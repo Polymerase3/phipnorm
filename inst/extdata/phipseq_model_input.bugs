@@ -1,0 +1,117 @@
+### JAGS model for PhIP-seq with input library counts and peptide-level stickiness
+# ----- data -----
+# N             number of samples (including beads-only)
+# B             vector indicating whether the sample is a beads-only control
+# n             vector of library sizes
+# P             number of peptides
+# Y             matrix of observed reads
+# psi           vector of input proportions (P), precomputed from input library
+#               with pseudocount applied (so psi[i] > 0 for all i)
+# kappa         vector of beads-only precision parameters (P):
+#               kappa[i] = a_0[i] + b_0[i], the estimated Beta precision per
+#               peptide from beads-only samples via getAB()
+#
+# ----- Prior parameters -----
+# a_tau, b_tau  Gamma hyperprior shape and rate for tau_delta
+# a_c, b_c      prior parameters for the attenuation constants
+# a_pi, b_pi    prior parameters for the probability of enrichment
+# a_phi, b_phi  prior parameters for the fold change for enriched peptides
+# fc            minimum fold change
+#
+# ----- parameters of interest -----
+# tau_delta     precision of the log-normal stickiness distribution; estimated
+#               from beads-only data. sigma_delta = 1/sqrt(tau_delta) is the
+#               experiment-level stickiness scale.
+# delta         vector of stickiness coefficients (P); delta[i] = 1 means
+#               the peptide is pulled down at exactly its input proportion;
+#               delta[i] > 1 is sticky, delta[i] < 1 is slippery.
+# c             vector of attenuation constants for each sample
+# pi            vector of enrichment probabilities for each sample
+# Z             matrix of enrichment indicators
+# theta         matrix of read probabilities
+# phi           matrix of fold-changes for enriched peptides
+# log_lik       total posterior log-likelihood
+#
+# ----- dummy variables -----
+# log_delta     log-scale stickiness (sampled by JAGS, delta derived from it)
+# phi_bg        effective background proportion = psi[i] * delta[i], clipped to
+#               (0, 1-1e-6) to keep Beta shape parameters strictly positive
+# a_0_eff,      beads-only Beta shape parameters under precision
+# b_0_eff         parameterisation: a = phi_bg * kappa, b = (1-phi_bg) * kappa
+# mean_e,       per-arm mean read probability (enriched / non-enriched)
+# mean_ne
+# a_e, b_e      Beta shape parameters for the enriched arm
+# a_ne, b_ne    Beta shape parameters for the non-enriched arm
+# a_sim, b_sim  per-cell selected Beta shape parameters fed to theta
+#
+# Note on Z for beads columns: pi[j] = 0 when B[j] = 1, so Z[i,j] ~ dbern(0)
+# and JAGS will always draw Z = 0 for beads samples. The a_sim selector
+# therefore reduces to a_0_eff for beads, as intended.
+
+model {
+
+  # --- Stickiness scale: estimated from data, shared across all peptides ---
+  tau_delta ~ dgamma(a_tau, b_tau)
+
+  # --- Stickiness block: one delta per peptide, informed by beads likelihood ---
+  for (i in 1:P) {
+    log_delta[i] ~ dnorm(0, tau_delta)
+    delta[i]     <- exp(log_delta[i])
+    # Clip to (0, 1-1e-6) so Beta shape parameters remain strictly positive
+    phi_bg[i]    <- min(psi[i] * delta[i], 1 - 1e-6)
+    # Precision parameterisation: a + b = kappa[i] (fixed from beads-only)
+    # This avoids moment-matching and eliminates the need for max(...,1) clamps
+    a_0_eff[i]   <- phi_bg[i] * kappa[i]
+    b_0_eff[i]   <- (1 - phi_bg[i]) * kappa[i]
+  }
+
+  for (j in 1:N) {
+    c_sample[j] ~ dbeta(a_c, b_c)
+    c[j]  <- B[j]*1 + (1 - B[j])*c_sample[j]
+
+    pi_sample[j] ~ dbeta(a_pi, b_pi)
+    pi[j] <- B[j]*0 + (1 - B[j])*pi_sample[j]
+
+    for (i in 1:P) {
+      Z[i,j] ~ dbern(pi[j])
+
+      phi_sample[i,j] ~ dgamma(a_phi, b_phi)
+      phi[i,j] <- (1 - Z[i,j])*1 + Z[i,j]*(fc + phi_sample[i,j])
+
+      # Enriched arm: shift the mean by phi*c, keep the same precision kappa
+      mean_e[i,j]  <- min(phi[i,j] * c[j] * phi_bg[i], 1 - 1e-6)
+      a_e[i,j]     <- mean_e[i,j] * kappa[i]
+      b_e[i,j]     <- (1 - mean_e[i,j]) * kappa[i]
+
+      # Non-enriched arm: mean = c * phi_bg, same precision kappa
+      mean_ne[i,j] <- c[j] * phi_bg[i]
+      a_ne[i,j]    <- mean_ne[i,j] * kappa[i]
+      b_ne[i,j]    <- (1 - mean_ne[i,j]) * kappa[i]
+
+      # Select shape parameters by arm:
+      #   B[j]=1 (beads)       -> a_0_eff  (Z=0 always because pi[j]=0)
+      #   B[j]=0, Z[i,j]=1     -> a_e
+      #   B[j]=0, Z[i,j]=0     -> a_ne
+      a_sim[i,j] <- Z[i,j]*a_e[i,j] + B[j]*a_0_eff[i] + (1 - Z[i,j] - B[j])*a_ne[i,j]
+      b_sim[i,j] <- Z[i,j]*b_e[i,j] + B[j]*b_0_eff[i] + (1 - Z[i,j] - B[j])*b_ne[i,j]
+
+      theta[i,j] ~ dbeta(a_sim[i,j], b_sim[i,j])
+      Y[i,j]     ~ dbinom(theta[i,j], n[j])
+
+      loglik_ij[i,j] <- logdensity.bin(Y[i,j], theta[i,j], n[j]) +
+                        logdensity.beta(theta[i,j], a_sim[i,j], b_sim[i,j]) +
+                        logdensity.bern(Z[i,j], pi[j]) +
+                        Z[i,j] * logdensity.gamma(phi_sample[i,j], a_phi, b_phi)
+    }
+
+    loglik_j[j] <- (1 - B[j]) * (logdensity.beta(c[j], a_c, b_c) +
+                                  logdensity.beta(pi[j], a_pi, b_pi))
+  }
+
+  for (i in 1:P) {
+    loglik_delta[i] <- logdensity.norm(log_delta[i], 0, tau_delta)
+  }
+  loglik_tau <- logdensity.gamma(tau_delta, a_tau, b_tau)
+
+  log_lik <- sum(loglik_ij) + sum(loglik_j) + sum(loglik_delta) + loglik_tau
+}
