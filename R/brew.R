@@ -62,6 +62,28 @@
     prior.params[params]
 }
 
+#' Compute input library proportions with pseudocount
+#'
+#' Converts raw input-library read counts into proportions.  A pseudocount is
+#' added before normalisation so that peptides with zero input reads are not
+#' permanently invisible to the model (psi = 0 would force phi_bg = 0 for all
+#' values of delta, decoupling stickiness from the likelihood).
+#'
+#' @param input.counts numeric vector of per-peptide read counts from the input
+#'   (pre-IP) phage library. Must be non-negative with at least one positive
+#'   value.
+#' @param pseudocount positive scalar added to every count before normalisation.
+#'   Default 0.5 (Jeffreys-style prior).
+#'
+#' @return named numeric vector of proportions summing to 1, same length and
+#'   names as \code{input.counts}.
+.computePsi <- function(input.counts, pseudocount = 0.5) {
+    if (any(input.counts < 0, na.rm = TRUE))
+        stop("input.counts must be non-negative.")
+    x <- input.counts + pseudocount
+    x / sum(x)
+}
+
 #' Clean up inputs for identifying super-enriched peptides
 #'
 #' Tidy inputs related to `se.params`. Supplies default values for
@@ -149,24 +171,25 @@
 .tidyAssayNames <- function(assay.names) {
     default <- c(
         phi = NA, phi_Z = "logfc", Z = "prob",
-        c = "sampleInfo", pi = "sampleInfo"
+        c = "sampleInfo", pi = "sampleInfo",
+        delta = NA, tau_delta = "sampleInfo"
     )
 
-    assays <- c("phi", "phi_Z", "Z", "c", "pi")
+    assays <- c("phi", "phi_Z", "Z", "c", "pi", "delta", "tau_delta")
 
     ## Set missing parameters to defaults
     missing_assays <- assays[!assays %in% names(assay.names)]
     assay.names[missing_assays] <- default[missing_assays]
 
-    ## Check that c and pi assay options are valid
-    valid <- c(
-        is.na(assay.names["c"]) | assay.names["c"] == "sampleInfo",
-        is.na(assay.names["pi"]) | assay.names["pi"] == "sampleInfo"
-    )
-    if (sum(valid) != 2) {
+    ## Check that sample-level scalars can only go to sampleInfo
+    sampleinfo_params <- c("c", "pi", "tau_delta")
+    valid <- vapply(sampleinfo_params, function(p) {
+        is.na(assay.names[p]) | assay.names[p] == "sampleInfo"
+    }, logical(1))
+    if (!all(valid)) {
         stop(
             "Invalid location specified. ",
-            paste0(c("c", "pi")[!valid], collapse = " and "),
+            paste0(sampleinfo_params[!valid], collapse = " and "),
             " can only be stored in the sampleInfo of a PhIPData object ",
             "(or not stored)."
         )
@@ -221,28 +244,61 @@ brewOne <- function(object, sample, prior.params,
     n.chains = 1, n.adapt = 1e3,
     n.iter = 1e4, thin = 1, na.rm = TRUE, ...,
     seed = as.numeric(format(Sys.Date(), "%Y%m%d"))) {
-    ## Define data
-    data_list <- list(
-        N = 1,
-        P = nrow(object),
-        B = 0,
-        n = librarySize(object[, sample], withDimnames = FALSE),
-        Y = unname(counts(object)[, sample, drop = FALSE])
-    )
-    data_list <- c(data_list, prior.params)
 
-    ## Define initial values
-    inits_list <- guessInits(
-        object[, sample],
-        list(
-            a_0 = prior.params[["a_0"]],
-            b_0 = prior.params[["b_0"]]
+    input_mode <- !is.null(prior.params[["psi"]])
+
+    if (input_mode) {
+        ## Input mode: object contains beads + patient sample (beads first).
+        ## delta is estimated jointly, informed by the beads-only likelihood.
+        data_list <- list(
+            N = ncol(object),
+            P = nrow(object),
+            B = as.integer(object$group == getBeadsName()),
+            n = librarySize(object, withDimnames = FALSE),
+            Y = unname(counts(object))
         )
-    )
+        data_list <- c(data_list, prior.params[c(
+            "psi", "kappa", "a_tau", "b_tau",
+            "a_pi", "b_pi", "a_phi", "b_phi", "a_c", "b_c", "fc"
+        )])
+
+        ## Initial values: derive a_0/b_0 equivalents from psi * kappa so that
+        ## guessInits can produce sensible starting theta and Z values
+        a_0_init <- prior.params[["psi"]] * prior.params[["kappa"]]
+        b_0_init <- (1 - prior.params[["psi"]]) * prior.params[["kappa"]]
+        inits_list <- guessInits(object, list(a_0 = a_0_init, b_0 = b_0_init))
+        inits_list$log_delta <- rep(0, nrow(object))  # start at delta = 1
+        inits_list$tau_delta <- prior.params[["a_tau"]] / prior.params[["b_tau"]]  # prior mean
+
+        model_file <- system.file(
+            "extdata/phipseq_model_input.bugs",
+            package = "beer"
+        )
+        variable_names <- c("c", "pi", "Z", "phi", "delta", "tau_delta")
+        sample_col    <- which(colnames(object) == sample)
+    } else {
+        ## Legacy mode: single sample, no input library
+        data_list <- list(
+            N = 1,
+            P = nrow(object),
+            B = 0,
+            n = librarySize(object[, sample], withDimnames = FALSE),
+            Y = unname(counts(object)[, sample, drop = FALSE])
+        )
+        data_list <- c(data_list, prior.params)
+
+        inits_list <- guessInits(
+            object[, sample],
+            list(a_0 = prior.params[["a_0"]], b_0 = prior.params[["b_0"]])
+        )
+
+        model_file    <- system.file("extdata/phipseq_model.bugs", package = "beer")
+        variable_names <- c("c", "pi", "Z", "phi")
+        sample_col    <- 1L
+    }
+
     inits_list$`.RNG.name` <- "base::Wichmann-Hill"
     inits_list$`.RNG.seed` <- seed
-
-    model_file <- system.file("extdata/phipseq_model.bugs", package = "beer")
 
     # Compile and run model
     capture.output({
@@ -254,13 +310,16 @@ brewOne <- function(object, sample, prior.params,
             n.adapt = n.adapt
         )
         mcmc <- coda.samples(jags_model,
-            variable.names = c("c", "pi", "Z", "phi"),
+            variable.names = variable_names,
             n.iter = n.iter, thin = thin,
             na.rm = na.rm, ...
         )
     })
 
-    mcmc
+    ## Wrap with metadata so summarizeRunOne knows which column is the patient
+    ## sample. Legacy runs (sample_col = 1) are indistinguishable from the old
+    ## plain-mcmc format by summarizeRunOne, which checks for the wrapper.
+    list(mcmc = mcmc, sample_col = sample_col)
 }
 
 #' Run BEER for all samples
@@ -326,6 +385,14 @@ brewOne <- function(object, sample, prior.params,
                 "a_c", "b_c", "fc"
             )]
         )
+
+        ## Input mode: subset psi to non-SE peptides; recompute kappa from the
+        ## already-subsetted beads prior so overdispersion stays consistent.
+        if (!is.null(prior.params[["psi"]])) {
+            new_prior$psi      <- prior.params[["psi"]][rownames(one_sample)]
+            new_prior$kappa    <- new_beads[["a_0"]] + new_beads[["b_0"]]
+            new_prior$tau_delta <- prior.params[["tau_delta"]]
+        }
 
         jags_run <- do.call(brewOne, c(
             list(
@@ -492,6 +559,23 @@ brew <- function(object,
     }
     jags.params <- .tidyInputsJAGS(jags.params)
     assay.names <- .tidyAssayNames(assay.names)
+
+    ## Input mode: detect samples with group == "input" in the PhIPData object.
+    ## If found, compute psi (input proportions) and kappa (beads precision) and
+    ## attach them to prior.params so brewOne switches to phipseq_model_input.bugs.
+    ## Multiple input-library columns are summed (treated as technical replicates).
+    input_id <- colnames(object)[object$group == getInputName()]
+    if (length(input_id) > 0) {
+        input_counts <- rowSums(counts(object)[, input_id, drop = FALSE])
+        psi <- .computePsi(input_counts)
+        kappa <- prior.params$a_0 + prior.params$b_0
+        prior.params$psi   <- psi
+        prior.params$kappa <- kappa
+        prior.params$a_tau <- if (!is.null(prior.params$a_tau)) prior.params$a_tau else 1
+        prior.params$b_tau <- if (!is.null(prior.params$b_tau)) prior.params$b_tau else 1
+        ## Default to storing delta when input mode is active
+        if (is.na(assay.names[["delta"]])) assay.names[["delta"]] <- "stickiness"
+    }
 
     ## Get sample names
     beads_id <- colnames(object[, object$group == getBeadsName()])
