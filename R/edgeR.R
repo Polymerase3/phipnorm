@@ -90,7 +90,7 @@
 #'
 #' beads_disp <- beer:::.edgeRBeads(sim_data)
 #' edgeROne(
-#'     sim_data, "9", colnames(sim_data)[sim_data$group == "beads"],
+#'     sim_data, "9", colnames(sim_data)[sim_data$group == getBeadsName()],
 #'     beads_disp$common.dispersion, beads_disp$tagwise.disp,
 #'     beads_disp$trended.disp
 #' )
@@ -142,7 +142,7 @@ edgeROne <- function(object, sample, beads,
 #'
 #' beads_disp <- beer:::.edgeRBeadsQLF(sim_data)
 #' edgeROneQLF(
-#'     sim_data, "9", colnames(sim_data)[sim_data$group == "beads"],
+#'     sim_data, "9", colnames(sim_data)[sim_data$group == getBeadsName()],
 #'     beads_disp$common.dispersion, beads_disp$tagwise.disp,
 #'     beads_disp$trended.disp
 #' )
@@ -255,7 +255,7 @@ runEdgeR <- function(object, threshold.cpm = 0, threshold.prevalence = 0,
         assay.names
     )
     sample_over <- .checkOverwrite(
-        object[, object$group != getBeadsName()],
+        object[, object$group == getSampleName()],
         assay.names
     )
     msg <- if (beadsRR & any(beads_over | sample_over, na.rm = TRUE)) {
@@ -303,7 +303,7 @@ runEdgeR <- function(object, threshold.cpm = 0, threshold.prevalence = 0,
     }
 
     ## Run edgeR one-sample at a time ------------
-    sample_names <- colnames(object[, object$group != getBeadsName()])
+    sample_names <- colnames(object[, object$group == getSampleName()])
     beads_names <- colnames(object[, object$group == getBeadsName()])
 
     output <- if (de.method == "exactTest") {

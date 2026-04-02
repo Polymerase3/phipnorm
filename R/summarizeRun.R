@@ -19,20 +19,35 @@ summarizeRunOne <- function(object, file, se.matrix,
     sample <- regmatches(file, regexec("/([^/]*)\\.rds", file))[[1]][2]
 
     rds <- readRDS(file)
-    mcmc_matrix <- as.matrix(rds)
+    ## Support both the legacy format (plain mcmc object) and the wrapped format
+    ## produced by brewOne (list with $mcmc and $sample_col).
+    if (is.list(rds) && !is.null(rds$sample_col)) {
+        mcmc_obj   <- rds$mcmc
+        sample_col <- rds$sample_col
+    } else {
+        mcmc_obj   <- rds
+        sample_col <- 1L
+    }
+    mcmc_matrix <- as.matrix(mcmc_obj)
     iter_ind <- seq(burn.in + 1, nrow(mcmc_matrix), by = post.thin)
-    mcmc_matrix <- mcmc_matrix[iter_ind, ]
+    mcmc_matrix <- mcmc_matrix[iter_ind, , drop = FALSE]
 
     ## translate peptide indices
     pep_ind <- rep(NA, nrow(object))
     pep_ind[which(!se.matrix[, sample])] <- seq(sum(!se.matrix[, sample]))
     names(pep_ind) <- rownames(object)
 
-    # for convenience extract parameter specific samples
-    samples_c <- mcmc_matrix[, grepl("c", colnames(mcmc_matrix))]
-    samples_pi <- mcmc_matrix[, grepl("pi", colnames(mcmc_matrix))]
-    samples_phi <- mcmc_matrix[, grepl("phi\\[", colnames(mcmc_matrix))]
-    samples_Z <- mcmc_matrix[, grepl("Z\\[", colnames(mcmc_matrix))]
+    ## Extract parameter-specific columns using sample_col to handle the
+    ## multi-column (input mode) case where c[j] and pi[j] are indexed by j.
+    c_col  <- paste0("c[", sample_col, "]")
+    pi_col <- paste0("pi[", sample_col, "]")
+    samples_c  <- mcmc_matrix[, c_col,  drop = TRUE]
+    samples_pi <- mcmc_matrix[, pi_col, drop = TRUE]
+
+    z_pat   <- paste0("Z\\[.*,", sample_col, "\\]")
+    phi_pat <- paste0("phi\\[.*,", sample_col, "\\]")
+    samples_phi <- mcmc_matrix[, grepl(phi_pat, colnames(mcmc_matrix)), drop = FALSE]
+    samples_Z   <- mcmc_matrix[, grepl(z_pat,   colnames(mcmc_matrix)), drop = FALSE]
 
     # summarize info
     point_c <- data.frame(
@@ -61,11 +76,37 @@ summarizeRunOne <- function(object, file, se.matrix,
         est_value = unname(colMeans(samples_Z)[pep_ind])
     )
 
+    ## delta and tau_delta (input mode only)
+    delta_cols <- grepl("^delta\\[", colnames(mcmc_matrix))
+    point_delta <- if (any(delta_cols)) {
+        samples_delta <- mcmc_matrix[, delta_cols, drop = FALSE]
+        data.frame(
+            parameter = "delta",
+            sample = sample,
+            peptide = rownames(object),
+            est_value = unname(colMeans(samples_delta)[pep_ind])
+        )
+    } else {
+        NULL
+    }
+
+    point_tau_delta <- if ("tau_delta" %in% colnames(mcmc_matrix)) {
+        data.frame(
+            parameter = "tau_delta",
+            sample = sample,
+            est_value = mean(mcmc_matrix[, "tau_delta"])
+        )
+    } else {
+        NULL
+    }
+
     list(
         point_c = point_c,
         point_pi = point_pi,
         point_phi = point_phi,
-        point_Z = point_Z
+        point_Z = point_Z,
+        point_delta = point_delta,
+        point_tau_delta = point_tau_delta
     )
 }
 
@@ -97,7 +138,8 @@ summarizeRun <- function(object, jags.files, se.matrix,
     burn.in = 0, post.thin = 1,
     assay.names = c(
         phi = NULL, phi_Z = "logfc", Z = "prob",
-        c = "sampleInfo", pi = "sampleInfo"
+        c = "sampleInfo", pi = "sampleInfo",
+        delta = NA, tau_delta = "sampleInfo"
     ),
     BPPARAM = BiocParallel::bpparam()) {
 
@@ -154,11 +196,26 @@ summarizeRun <- function(object, jags.files, se.matrix,
         matrix(NA, nrow = nrow(object), ncol = ncol(object))
     }
 
-    names(point_c) <- names(point_pi) <- colnames(point_phi) <-
-        colnames(point_phi_Z) <- colnames(point_Z) <-
+    point_delta <- if (!is.na(assay.names["delta"]) &
+        assay.names["delta"] %in% assayNames(object)) {
+        assay(object, assay.names["delta"])
+    } else {
+        matrix(NA, nrow = nrow(object), ncol = ncol(object))
+    }
+
+    point_tau_delta <- if (!is.na(assay.names["tau_delta"]) &
+        assay.names["tau_delta"] %in% colnames(sampleInfo(object))) {
+        sampleInfo(object)[[assay.names["tau_delta"]]]
+    } else {
+        rep(NA, ncol(object))
+    }
+
+    names(point_c) <- names(point_pi) <- names(point_tau_delta) <-
+        colnames(point_phi) <- colnames(point_phi_Z) <-
+        colnames(point_Z) <- colnames(point_delta) <-
         colnames(object)
     rownames(point_phi) <- rownames(point_phi_Z) <- rownames(point_Z) <-
-        rownames(object)
+        rownames(point_delta) <- rownames(object)
 
     ## Summarize each file, use bplapply here to enable reading/import
     ## to be parallelized
@@ -181,17 +238,27 @@ summarizeRun <- function(object, jags.files, se.matrix,
         point_phi[, sample] <- out$point_phi$est_value
         point_phi_Z[, sample] <- out$point_phi$est_enriched
         point_Z[, sample] <- out$point_Z$est_value
+        if (!is.null(out$point_delta)) {
+            point_delta[, sample] <- out$point_delta$est_value
+        }
+        if (!is.null(out$point_tau_delta)) {
+            point_tau_delta[sample] <- out$point_tau_delta$est_value
+        }
     }
 
-    ## Assign c and pi to sampleInfo
+    ## Assign sample-level scalars to sampleInfo
     if (!is.na(assay.names["c"])) object$c <- point_c
     if (!is.na(assay.names["pi"])) object$pi <- point_pi
+    if (!is.na(assay.names["tau_delta"])) object$tau_delta <- point_tau_delta
 
-    ## Assign phi, phi_Z, and Z to assays
+    ## Assign phi, phi_Z, Z, and (when present) delta to assays
     assay <- c("phi", "phi_Z", "Z")[!is.na(assay.names[c("phi", "phi_Z", "Z")])]
     assays(object)[assay.names[assay]] <- list(
         phi = point_phi, phi_Z = point_phi_Z,
         Z = point_Z
     )[assay]
+    if (!is.na(assay.names["delta"])) {
+        assays(object)[[assay.names[["delta"]]]] <- point_delta
+    }
     object
 }
