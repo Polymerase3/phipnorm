@@ -495,7 +495,7 @@ brew <- function(object,
 
     ## Get sample names
     beads_id <- colnames(object[, object$group == getBeadsName()])
-    sample_id <- colnames(object[, object$group != getBeadsName()])
+    sample_id <- colnames(object[, object$group == getSampleName()])
 
     ## Guess which peptides are super-enriched
     se.matrix <- if (is.null(se.params)) {
@@ -536,7 +536,7 @@ brew <- function(object,
         assay.names
     )
     sample_over <- .checkOverwrite(
-        object[, object$group != getBeadsName()],
+        object[, object$group == getSampleName()],
         assay.names
     )
     msg <- if (beadsRR & any(beads_over | sample_over, na.rm = TRUE)) {

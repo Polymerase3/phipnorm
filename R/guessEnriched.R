@@ -58,7 +58,7 @@
     ## Require an observed FC of 5 (w/o accounting for the attenuation constant)
     guess_e <- apply(fc_beads, c(1, 2), function(x) ifelse(x > 5, 1, 0))
     c_est <- vapply(seq(ncol(guess_e)), function(col) {
-        if (object$group[col] != getBeadsName()) {
+        if (object$group[col] == getSampleName()) {
             ne_peps <- !guess_e[, col]
             coef(lm(counts(object)[ne_peps, col] ~
                 expected_rc[ne_peps, col] - 1))
