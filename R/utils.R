@@ -1,3 +1,8 @@
+getBeadsName  <- function() "beads"
+getSampleName <- function() "sample"
+getAnchorName <- function() "anchor"
+getInputName  <- function() "input"
+
 #' Function to check that the counts matrix only contains integers
 #'
 #' @param object PhIPData object
