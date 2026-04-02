@@ -1,0 +1,51 @@
+Package: beer
+Type: Package
+Title: Bayesian Enrichment Estimation in R
+Version: 1.15.1
+Authors@R: c(person("Athena", "Chen", email = "achen70@jhu.edu", 
+    role = c("aut", "cre"), comment = c(ORCID = "0000-0001-6900-2264")),
+    person("Rob", "Scharpf", email = "rscharpf@jhu.edu", 
+    role = c("aut")), 
+    person("Ingo", "Ruczinski", email = "ingo@jhu.edu", 
+    role = c("aut")))
+Description: BEER implements a Bayesian model for analyzing 
+    phage-immunoprecipitation sequencing (PhIP-seq) data. Given a PhIPData 
+    object, BEER returns posterior probabilities of enriched antibody responses, 
+    point estimates for the relative fold-change in comparison to negative
+    control samples, and more. Additionally, BEER provides a convenient 
+    implementation for using edgeR to identify enriched antibody responses.
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: false
+Depends: 
+    R (>= 4.2.0),
+    PhIPData (>= 1.1.1), 
+    rjags
+Imports:
+    cli,
+    edgeR,
+    BiocParallel,
+    methods,
+    progressr,
+    stats,
+    SummarizedExperiment,
+    utils
+Suggests: 
+    testthat (>= 3.0.0),
+    BiocStyle,
+    covr,
+    codetools,
+    knitr,
+    rmarkdown,
+    dplyr,
+    ggplot2,
+    spelling
+SystemRequirements:
+    JAGS (4.3.0)
+biocViews: Software, StatisticalMethod, Bayesian, Sequencing, Coverage
+URL: https://github.com/athchen/beer/
+BugReports: https://github.com/athchen/beer/issues
+Config/testthat/edition: 3
+VignetteBuilder: knitr
+RoxygenNote: 7.3.3
+Language: en-US
